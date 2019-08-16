@@ -1751,6 +1751,27 @@ static int handle_aiocb_discard(void *opaque)
     return ret;
 }
 
+/*
+ * Help alignment detection by allocating the first block.
+ *
+ * When reading with direct I/O from unallocated area on Gluster backed by XFS,
+ * reading succeeds regardless of request length. In this case we fallback to
+ * safe aligment which is not optimal. Allocating the first block when creating
+ * avoids this fallback.
+ *
+ * Since this is an optimization, the caller may ignore failures.
+ */
+static int allocate_first_block(int fd)
+{
+    int err;
+
+    do {
+        err = pwrite(fd, "\0", 1, 0);
+    } while (err == -1 && errno == EINTR);
+
+    return err;
+}
+
 static int handle_aiocb_truncate(void *opaque)
 {
     RawPosixAIOData *aiocb = opaque;
@@ -1790,6 +1811,8 @@ static int handle_aiocb_truncate(void *opaque)
                 /* posix_fallocate() doesn't set errno. */
                 error_setg_errno(errp, -result,
                                  "Could not preallocate new data");
+            } else if (current_length == 0) {
+                allocate_first_block(fd);
             }
         } else {
             result = 0;
@@ -1851,6 +1874,8 @@ static int handle_aiocb_truncate(void *opaque)
         if (ftruncate(fd, offset) != 0) {
             result = -errno;
             error_setg_errno(errp, -result, "Could not resize file");
+        } else if (current_length == 0 && offset > current_length) {
+            allocate_first_block(fd);
         }
         return result;
     default:
